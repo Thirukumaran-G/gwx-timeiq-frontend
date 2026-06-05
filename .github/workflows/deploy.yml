@@ -2,9 +2,7 @@ name: "Frontend — CI/CD"
 
 on:
   push:
-    branches: [main, staging]
-  pull_request:
-    branches: [main, staging]
+    branches: [staging]
 
 permissions:
   contents: read
@@ -34,11 +32,10 @@ jobs:
   build-scan-deploy:
     name: "Build → Scan → Deploy"
     needs: test
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+    environment: staging
     concurrency:
-      group: deploy-frontend-${{ github.ref_name }}
+      group: deploy-frontend-staging
       cancel-in-progress: false
 
     steps:
@@ -76,7 +73,7 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ github.ref_name == 'main' && secrets.FRONTEND_DEPLOYER_SA_EMAIL_PROD || secrets.FRONTEND_DEPLOYER_SA_EMAIL_STAGING }}
+          service_account: ${{ secrets.FRONTEND_DEPLOYER_SA_EMAIL }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
@@ -85,25 +82,24 @@ jobs:
           gsutil -m \
             -h "Cache-Control:public,max-age=${{ secrets.STATIC_CACHE_MAX_AGE }},immutable" \
             cp -r build/static \
-            gs://${{ github.ref_name == 'main' && secrets.FRONTEND_BUCKET_PROD || secrets.FRONTEND_BUCKET_STAGING }}/static
+            gs://${{ secrets.FRONTEND_BUCKET }}/static
 
       - name: Upload index.html (no cache)
         run: |
           gsutil \
             -h "Cache-Control:no-cache,no-store,must-revalidate" \
             cp build/index.html \
-            gs://${{ github.ref_name == 'main' && secrets.FRONTEND_BUCKET_PROD || secrets.FRONTEND_BUCKET_STAGING }}/index.html
+            gs://${{ secrets.FRONTEND_BUCKET }}/index.html
 
       - name: Upload remaining root files
         run: |
           gsutil -m cp build/manifest.json build/robots.txt \
-            gs://${{ github.ref_name == 'main' && secrets.FRONTEND_BUCKET_PROD || secrets.FRONTEND_BUCKET_STAGING }}/ 2>/dev/null || true
+            gs://${{ secrets.FRONTEND_BUCKET }}/ 2>/dev/null || true
 
       - name: Invalidate CDN cache
         run: |
-          ENV=${{ github.ref_name == 'main' && 'prod' || 'staging' }}
           gcloud compute url-maps invalidate-cdn-cache \
-            "${{ secrets.APP_NAME }}-lb-${ENV}" \
+            "${{ secrets.APP_NAME }}-lb-staging" \
             --path "/*" \
             --project ${{ secrets.GCP_PROJECT_ID }} \
             --async --quiet
