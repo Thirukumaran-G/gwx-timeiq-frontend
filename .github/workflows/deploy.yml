@@ -1,0 +1,118 @@
+name: "Frontend — CI/CD"
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  test:
+    name: "Test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  build-scan-deploy:
+    name: "Build → Scan → Deploy"
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+    concurrency:
+      group: deploy-frontend-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        env:
+          REACT_APP_API_BASE: https://${{ secrets.DOMAIN }}/api
+          REACT_APP_POLL_INTERVAL_MS: ${{ secrets.POLL_INTERVAL_MS }}
+        run: npm run build
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          severity: ${{ secrets.TRIVY_SEVERITY }}
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ github.ref_name == 'main' && secrets.FRONTEND_DEPLOYER_SA_EMAIL_PROD || secrets.FRONTEND_DEPLOYER_SA_EMAIL_STAGING }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload static assets (immutable cache)
+        run: |
+          gsutil -m \
+            -h "Cache-Control:public,max-age=${{ secrets.STATIC_CACHE_MAX_AGE }},immutable" \
+            cp -r build/static \
+            gs://${{ github.ref_name == 'main' && secrets.FRONTEND_BUCKET_PROD || secrets.FRONTEND_BUCKET_STAGING }}/static
+
+      - name: Upload index.html (no cache)
+        run: |
+          gsutil \
+            -h "Cache-Control:no-cache,no-store,must-revalidate" \
+            cp build/index.html \
+            gs://${{ github.ref_name == 'main' && secrets.FRONTEND_BUCKET_PROD || secrets.FRONTEND_BUCKET_STAGING }}/index.html
+
+      - name: Upload remaining root files
+        run: |
+          gsutil -m cp build/manifest.json build/robots.txt \
+            gs://${{ github.ref_name == 'main' && secrets.FRONTEND_BUCKET_PROD || secrets.FRONTEND_BUCKET_STAGING }}/ 2>/dev/null || true
+
+      - name: Invalidate CDN cache
+        run: |
+          ENV=${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+          gcloud compute url-maps invalidate-cdn-cache \
+            "${{ secrets.APP_NAME }}-lb-${ENV}" \
+            --path "/*" \
+            --project ${{ secrets.GCP_PROJECT_ID }} \
+            --async --quiet
+
+      - name: Smoke test
+        run: |
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+            --retry ${{ secrets.SMOKE_RETRY_COUNT }} \
+            --retry-delay ${{ secrets.SMOKE_RETRY_DELAY }} \
+            https://${{ secrets.DOMAIN }})
+          [ "$STATUS" = "200" ] && echo "✅ Smoke test passed" \
+            || (echo "❌ Smoke test failed: ${STATUS}" && exit 1)
