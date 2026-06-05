@@ -97,6 +97,7 @@ jobs:
             gs://${{ secrets.FRONTEND_BUCKET }}/ 2>/dev/null || true
 
       - name: Invalidate CDN cache
+        continue-on-error: true
         run: |
           gcloud compute url-maps invalidate-cdn-cache \
             "${{ secrets.APP_NAME }}-lb-staging" \
