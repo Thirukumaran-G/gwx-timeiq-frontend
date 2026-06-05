@@ -55,7 +55,7 @@ jobs:
         run: npm run build
 
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
